@@ -1,0 +1,12 @@
+node_modules
+.cache
+.git
+.github
+.gitignore
+*.log
+*.md
+.DS_Store
+Dockerfile
+docker-compose.yml
+.dockerignore
+.env

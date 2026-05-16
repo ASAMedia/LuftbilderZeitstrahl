@@ -1,0 +1,35 @@
+# Run on your own server:
+#   1. copy .env.example -> .env and set IMAGE (+ HOST_PORT if you like)
+#   2. docker compose pull        # fetch the image GitHub built & pushed
+#   3. docker compose up -d
+#
+# Local build instead of pulling:  docker compose build && docker compose up -d
+
+services:
+  app:
+    # Image published by the GitHub Actions workflow (see .github/workflows).
+    # `build: .` lets `docker compose build` produce the same image locally.
+    image: ${IMAGE:-ghcr.io/OWNER/luftbilder-zeitstrahl:latest}
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    environment:
+      PORT: "3000"
+      CACHE_DIR: /data
+      TZ: ${TZ:-Europe/Berlin}
+    volumes:
+      - lz-cache:/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  lz-cache:
