@@ -37,8 +37,9 @@ docker compose pull
 docker compose up -d
 ```
 
-App is then on `http://<server>:${HOST_PORT:-3000}`. Put it behind your own
-reverse proxy / TLS as usual.
+App is then on `http://<server>:${HOST_PORT:-3222}` (host port 3222 by
+default — 3000 is assumed taken on the server; the container still listens on
+3000 internally). Put it behind your own reverse proxy / TLS as usual.
 
 - **Build locally instead of pulling:** `docker compose build && docker compose up -d`
   (the compose file has both `image:` and `build: .`).
