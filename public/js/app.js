@@ -373,10 +373,27 @@ async function loadTiles() {
 
   state.tileLayers = layers; // for click-to-cycle through overlaps
 
+  // First-run tip: only meaningful when aerial frames actually overlap.
+  if (state.type === 'lb' && layers.length > 1) showPeelHint();
+  else hidePeelHint();
+
   // Keep the bar/percent live until the frames have actually loaded
   // (server-side processing can lag well behind overlay creation).
   trackImageProgress(token, layers, finalMsg);
   updateSpotlight();
+}
+
+const PEEL_HINT_KEY = 'lzPeelHintDone';
+function showPeelHint() {
+  try {
+    if (localStorage.getItem(PEEL_HINT_KEY) === '1') return;
+  } catch {
+    /* localStorage unavailable — just show it */
+  }
+  el('hint').classList.remove('hidden');
+}
+function hidePeelHint() {
+  el('hint').classList.add('hidden');
 }
 
 // Click a frame → send it to the back of the whole stack, revealing whatever
@@ -582,6 +599,7 @@ function dropGroup(g) {
 
 async function startPlayback() {
   if (state.playing || !state.years.length) return;
+  hidePeelHint();
   state.playing = true;
   el('playBtn').textContent = '⏸';
   el('playBtn').title = 'Zeitraffer stoppen';
@@ -942,6 +960,7 @@ async function exportVideo() {
     return;
   }
   if (state.playing) stopPlayback(false);
+  hidePeelHint();
 
   exporting = true;
   exportCancel = false;
@@ -1267,6 +1286,15 @@ function openAbout() {
 function closeAbout() {
   aboutOverlay.classList.add('hidden');
 }
+
+el('hintClose').addEventListener('click', () => {
+  hidePeelHint();
+  try {
+    localStorage.setItem(PEEL_HINT_KEY, '1');
+  } catch {
+    /* ignore */
+  }
+});
 
 el('aboutBtn').addEventListener('click', openAbout);
 el('aboutLink').addEventListener('click', openAbout);

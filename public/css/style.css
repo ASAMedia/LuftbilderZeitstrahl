@@ -304,6 +304,60 @@ body {
   border-color: var(--accent);
 }
 
+/* First-run tip explaining click-to-peel for overlapping aerial frames */
+#hint {
+  position: absolute;
+  top: 200px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1600;
+  width: min(420px, 92vw);
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  padding: 14px 16px 12px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+}
+
+#hint.hidden {
+  display: none;
+}
+
+#hint .hint-body strong {
+  display: block;
+  font-size: 14px;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+
+#hint .hint-body p {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+#hint #hintClose {
+  display: block;
+  margin-left: auto;
+  background: var(--accent);
+  color: #1a1d23;
+  border: 0;
+  border-radius: 7px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+@media (max-width: 760px) {
+  #hint {
+    top: auto;
+    bottom: 150px;
+  }
+}
+
 /* Big center-bottom year shown during the cinematic timeline render */
 #bigYear {
   position: absolute;
