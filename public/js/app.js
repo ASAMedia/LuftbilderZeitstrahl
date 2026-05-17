@@ -645,6 +645,101 @@ const loadImage = (src) =>
     im.src = src;
   });
 
+// Client-side (export only — no server load): trim the dark scan border off an
+// aerial frame and feather its edges. Returns a reduced-resolution content
+// canvas plus where its top-left sits in the ORIGINAL image (ox,oy) and how
+// many content-canvas px correspond to one original px (scaleF), so the caller
+// can keep the footprint geo-registration exact.
+const canFilter =
+  typeof CanvasRenderingContext2D !== 'undefined' &&
+  'filter' in CanvasRenderingContext2D.prototype;
+
+function featherLbTile(img) {
+  try {
+    const W = img.naturalWidth;
+    const H = img.naturalHeight;
+    if (!W || !H) return null;
+
+    // --- detect content rect on a downscaled copy (cheap) ---
+    const ss = Math.min(1, 220 / Math.max(W, H));
+    const sw = Math.max(1, Math.round(W * ss));
+    const sh = Math.max(1, Math.round(H * ss));
+    const sc0 = document.createElement('canvas');
+    sc0.width = sw;
+    sc0.height = sh;
+    const sx0 = sc0.getContext('2d');
+    sx0.drawImage(img, 0, 0, sw, sh);
+    const d = sx0.getImageData(0, 0, sw, sh).data;
+    const dark = (px, py) => {
+      const i = (py * sw + px) * 4;
+      return (d[i] + d[i + 1] + d[i + 2]) / 3 < 46;
+    };
+    const rowDark = (py) => {
+      let n = 0;
+      for (let px = 0; px < sw; px++) if (dark(px, py)) n++;
+      return n / sw > 0.85;
+    };
+    const colDark = (px) => {
+      let n = 0;
+      for (let py = 0; py < sh; py++) if (dark(px, py)) n++;
+      return n / sh > 0.85;
+    };
+    let t = 0;
+    let b = sh - 1;
+    let l = 0;
+    let r = sw - 1;
+    while (t < sh && rowDark(t)) t++;
+    while (b > t && rowDark(b)) b--;
+    while (l < sw && colDark(l)) l++;
+    while (r > l && colDark(r)) r--;
+    let ox = Math.round((l / sw) * W);
+    let oy = Math.round((t / sh) * H);
+    let cw0 = Math.round(((r - l + 1) / sw) * W);
+    let ch0 = Math.round(((b - t + 1) / sh) * H);
+    // implausible trim → keep full frame
+    if (cw0 < W * 0.4 || ch0 < H * 0.4) {
+      ox = 0;
+      oy = 0;
+      cw0 = W;
+      ch0 = H;
+    }
+
+    // --- crop + feather at a capped working resolution ---
+    const scaleF = Math.min(1, 1600 / Math.max(cw0, ch0));
+    const CW = Math.max(2, Math.round(cw0 * scaleF));
+    const CH = Math.max(2, Math.round(ch0 * scaleF));
+    const out = document.createElement('canvas');
+    out.width = CW;
+    out.height = CH;
+    const oc = out.getContext('2d');
+    oc.drawImage(img, ox, oy, cw0, ch0, 0, 0, CW, CH);
+
+    const F = Math.max(6, Math.round(Math.min(CW, CH) * 0.06));
+    const mask = document.createElement('canvas');
+    mask.width = CW;
+    mask.height = CH;
+    const mc = mask.getContext('2d');
+    mc.fillStyle = '#fff';
+    mc.fillRect(F, F, CW - 2 * F, CH - 2 * F);
+    let alphaSrc = mask;
+    if (canFilter) {
+      const bl = document.createElement('canvas');
+      bl.width = CW;
+      bl.height = CH;
+      const bc = bl.getContext('2d');
+      bc.filter = `blur(${(F * 0.6).toFixed(1)}px)`;
+      bc.drawImage(mask, 0, 0);
+      alphaSrc = bl;
+    }
+    oc.globalCompositeOperation = 'destination-in';
+    oc.drawImage(alphaSrc, 0, 0);
+    oc.globalCompositeOperation = 'source-over';
+    return { canvas: out, ox, oy, scaleF };
+  } catch {
+    return null; // fall back to drawing the raw image
+  }
+}
+
 // Draw one year's tiles onto its own full-size canvas using the (frozen)
 // current map projection — same ordering/placement as the live mosaic.
 async function renderYearCanvas(feats, cw, ch, sc) {
@@ -671,16 +766,28 @@ async function renderYearCanvas(feats, cw, ch, sc) {
       const P0 = map.latLngToContainerPoint(L.latLng(rc[0]));
       const P1 = map.latLngToContainerPoint(L.latLng(rc[1]));
       const P2 = map.latLngToContainerPoint(L.latLng(rc[2]));
+      // per ORIGINAL-image-pixel deltas of the footprint affine
+      const ax = ((P1.x - P0.x) * sc) / W;
+      const ay = ((P1.y - P0.y) * sc) / W;
+      const cx = ((P2.x - P0.x) * sc) / H;
+      const cy = ((P2.y - P0.y) * sc) / H;
+      const ft = featherLbTile(img);
       x.save();
-      x.setTransform(
-        ((P1.x - P0.x) * sc) / W,
-        ((P1.y - P0.y) * sc) / W,
-        ((P2.x - P0.x) * sc) / H,
-        ((P2.y - P0.y) * sc) / H,
-        P0.x * sc,
-        P0.y * sc
-      );
-      x.drawImage(img, 0, 0);
+      if (ft) {
+        // content-canvas px → original px: (ox + i/scaleF, oy + j/scaleF)
+        x.setTransform(
+          ax / ft.scaleF,
+          ay / ft.scaleF,
+          cx / ft.scaleF,
+          cy / ft.scaleF,
+          P0.x * sc + ax * ft.ox + cx * ft.oy,
+          P0.y * sc + ay * ft.ox + cy * ft.oy
+        );
+        x.drawImage(ft.canvas, 0, 0);
+      } else {
+        x.setTransform(ax, ay, cx, cy, P0.x * sc, P0.y * sc);
+        x.drawImage(img, 0, 0);
+      }
       x.restore();
     } else {
       const b = p.bounds; // [[s,w],[n,e]]
