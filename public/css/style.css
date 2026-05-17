@@ -551,6 +551,26 @@ body {
   line-height: 1;
 }
 
+#hintBtn {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 50%;
+  border: 1px solid #333a45;
+  background: #232936;
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  line-height: 1;
+}
+
+#aboutBtn:hover,
+#hintBtn:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
 #exportBtn {
   flex: none;
   border: 1px solid #333a45;

@@ -5,10 +5,41 @@
 const MIN_ZOOM = 13;
 const PLAY_INTERVAL_MS = 1800;
 
+// Restore the last map view from a previous visit; otherwise show Thüringen.
+const VIEW_KEY = 'lzView';
+function savedView() {
+  try {
+    const v = JSON.parse(localStorage.getItem(VIEW_KEY) || 'null');
+    if (
+      v &&
+      Number.isFinite(v.lat) &&
+      Number.isFinite(v.lng) &&
+      Number.isFinite(v.z)
+    ) {
+      return v;
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+const _v0 = savedView();
 const map = L.map('map', { zoomControl: true, minZoom: 7 }).setView(
-  [50.91, 11.03],
-  9
+  _v0 ? [_v0.lat, _v0.lng] : [50.91, 11.03],
+  _v0 ? _v0.z : 9
 );
+
+map.on('moveend zoomend', () => {
+  try {
+    const c = map.getCenter();
+    localStorage.setItem(
+      VIEW_KEY,
+      JSON.stringify({ lat: c.lat, lng: c.lng, z: map.getZoom() })
+    );
+  } catch {
+    /* localStorage unavailable */
+  }
+});
 
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
@@ -394,6 +425,15 @@ function showPeelHint() {
 }
 function hidePeelHint() {
   el('hint').classList.add('hidden');
+}
+// "?" button: re-show the tip on demand and reset the dismissed flag.
+function reShowPeelHint() {
+  try {
+    localStorage.removeItem(PEEL_HINT_KEY);
+  } catch {
+    /* ignore */
+  }
+  el('hint').classList.remove('hidden');
 }
 
 // Click a frame → send it to the back of the whole stack, revealing whatever
@@ -1295,6 +1335,8 @@ el('hintClose').addEventListener('click', () => {
     /* ignore */
   }
 });
+
+el('hintBtn').addEventListener('click', reShowPeelHint);
 
 el('aboutBtn').addEventListener('click', openAbout);
 el('aboutLink').addEventListener('click', openAbout);
