@@ -152,6 +152,7 @@ function viewportBbox() {
 
 let yearsTimer = null;
 function scheduleRefresh() {
+  if (state.playing) return; // viewport is frozen during a timeline render
   clearTimeout(yearsTimer);
   yearsTimer = setTimeout(refreshYears, 350);
 }
@@ -227,6 +228,28 @@ function imageCorners(corners) {
 
 // --- per-year tile mosaic ---------------------------------------------------
 
+// Build a single tile overlay (rotated for lb, axis-aligned for op) — shared
+// by the normal load path and the cinematic playback.
+function createTileLayer(p, opacity, interactive) {
+  const src = `/api/preview?type=${p.type}&id=${p.gid}${p.type === 'lb' ? '&v=5' : ''}`;
+  let layer;
+  if (p.type === 'lb' && L.imageOverlay.rotated) {
+    const rc = imageCorners(p.corners);
+    if (rc) {
+      layer = L.imageOverlay.rotated(
+        src,
+        L.latLng(rc[0]),
+        L.latLng(rc[1]),
+        L.latLng(rc[2]),
+        { opacity, interactive }
+      );
+    }
+  }
+  if (!layer) layer = L.imageOverlay(src, p.bounds, { opacity, interactive });
+  if (p.quality != null && layer.setZIndex) layer.setZIndex(Math.round(p.quality));
+  return layer;
+}
+
 async function loadTiles() {
   const y = currentYear();
   if (y == null) return;
@@ -276,28 +299,7 @@ async function loadTiles() {
   const layers = [];
   for (const f of ordered) {
     const p = f.properties;
-    // `v` busts the browser cache when the lb processing pipeline changes.
-    const src = `/api/preview?type=${p.type}&id=${p.gid}${p.type === 'lb' ? '&v=5' : ''}`;
-    let layer;
-
-    if (p.type === 'lb' && L.imageOverlay.rotated) {
-      const rc = imageCorners(p.corners);
-      if (rc) {
-        layer = L.imageOverlay.rotated(
-          src,
-          L.latLng(rc[0]),
-          L.latLng(rc[1]),
-          L.latLng(rc[2]),
-          { opacity: state.opacity, interactive: true }
-        );
-      }
-    }
-    if (!layer) {
-      layer = L.imageOverlay(src, p.bounds, {
-        opacity: state.opacity,
-        interactive: true,
-      });
-    }
+    const layer = createTileLayer(p, state.opacity, true);
 
     layer.bindPopup(
       `<div class="tile-popup">
@@ -309,7 +311,6 @@ async function loadTiles() {
     );
     imageryLayer.addLayer(layer);
     layers.push(layer);
-    if (p.quality != null && layer.setZIndex) layer.setZIndex(Math.round(p.quality));
 
     if (state.showOutlines) {
       outlineLayer.addLayer(
@@ -360,8 +361,8 @@ const spotEl = el('spotlight');
 let spotGid = null;
 
 function updateSpotlight() {
-  // Only meaningful for the overlapping aerial frames.
-  if (state.type !== 'lb' || !state.features || !state.features.length) {
+  // Hidden during a cinematic render; only meaningful for aerial frames.
+  if (state.playing || state.type !== 'lb' || !state.features || !state.features.length) {
     spotEl.classList.add('hidden');
     spotGid = null;
     return;
@@ -415,23 +416,200 @@ function applyOpacity() {
 
 function setIdx(i) {
   if (!state.years.length) return;
+  if (state.playing) stopPlayback(false); // manual step cancels the render
   state.idx = Math.max(0, Math.min(state.years.length - 1, i));
   updateLabel();
   loadTiles();
 }
 
-function togglePlay() {
-  if (!state.years.length) return;
-  state.playing = !state.playing;
-  el('playBtn').textContent = state.playing ? '⏸' : '▶';
-  if (state.playing) {
-    state.playTimer = setInterval(() => {
-      const next = state.idx + 1 > state.years.length - 1 ? 0 : state.idx + 1;
-      setIdx(next);
-    }, PLAY_INTERVAL_MS);
-  } else {
-    clearInterval(state.playTimer);
+// --- cinematic timeline render ---------------------------------------------
+// Plays through every year available for the CURRENT viewport, cross-fading
+// between mosaics (preloading the next year while the current one shows) with
+// a big center-bottom year that animates on each change.
+
+const PLAY_DWELL_MS = 1600; // how long each year stays fully visible
+const PLAY_FADE_MS = 650; // cross-fade duration
+const PLAY_LOAD_TIMEOUT = 12000; // don't stall a slow dense year forever
+
+let playToken = 0;
+const pbGroups = new Set();
+
+const sleepCancellable = (ms, cancelled) =>
+  new Promise((res) => {
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      if (cancelled() || Date.now() - t0 >= ms) {
+        clearInterval(iv);
+        res();
+      }
+    }, 80);
+  });
+
+const tween = (ms, step) =>
+  new Promise((res) => {
+    const t0 = performance.now();
+    const fr = (t) => {
+      const k = Math.min(1, (t - t0) / ms);
+      step(k);
+      k < 1 ? requestAnimationFrame(fr) : res();
+    };
+    requestAnimationFrame(fr);
+  });
+
+function setGroupOpacity(group, v) {
+  group.eachLayer((l) => l.setOpacity && l.setOpacity(v));
+}
+
+function whenSettled(layers, timeoutMs, onProgress) {
+  return new Promise((res) => {
+    if (!layers.length) return res();
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      let s = 0;
+      for (const l of layers) {
+        const e = l._rawImage || (l.getElement && l.getElement());
+        if (e && e.tagName === 'IMG' && e.complete) s++;
+      }
+      if (onProgress) onProgress(s / layers.length);
+      if (s >= layers.length || Date.now() - t0 > timeoutMs) {
+        clearInterval(iv);
+        res();
+      }
+    }, 200);
+  });
+}
+
+// Build one year's overlay group for a fixed bbox and add it to the map at
+// opacity 0 (adding is what makes Leaflet start downloading the images).
+async function buildYearGroup(bbox, type, cover, year, isValid) {
+  let feats = [];
+  try {
+    const fc = await fetch(
+      `/api/tiles?bbox=${bbox}&type=${type}&from=${year}&to=${year}` +
+        (cover ? '&cover=1' : '')
+    ).then((r) => r.json());
+    feats = (fc && fc.features) || [];
+  } catch {
+    /* treated as an empty year */
   }
+  // Playback was stopped while this (possibly pre-)load was in flight — don't
+  // attach an orphan group to the map.
+  if (isValid && !isValid()) return { group: null, layers: [] };
+  const group = L.layerGroup();
+  const layers = [];
+  feats
+    .slice()
+    .sort((a, b) => (a.properties.quality || 0) - (b.properties.quality || 0))
+    .forEach((f) => {
+      const layer = createTileLayer(f.properties, 0, false);
+      group.addLayer(layer);
+      layers.push(layer);
+    });
+  group.addTo(map);
+  pbGroups.add(group);
+  setGroupOpacity(group, 0);
+  return { group, layers };
+}
+
+function setBigYear(y) {
+  const e = el('bigYear');
+  e.textContent = y;
+  e.classList.remove('hidden', 'anim');
+  void e.offsetWidth; // restart the pop animation
+  e.classList.add('anim');
+}
+
+function dropGroup(g) {
+  if (g) {
+    map.removeLayer(g);
+    pbGroups.delete(g);
+  }
+}
+
+async function startPlayback() {
+  if (state.playing || !state.years.length) return;
+  state.playing = true;
+  el('playBtn').textContent = '⏸';
+  el('playBtn').title = 'Zeitraffer stoppen';
+
+  const token = ++playToken;
+  const bbox = viewportBbox();
+  const type = state.type;
+  const cover = type === 'lb' && state.cover;
+  const alive = () => state.playing && token === playToken;
+
+  imageryLayer.clearLayers();
+  outlineLayer.clearLayers();
+  spotEl.classList.add('hidden');
+  setStatus('');
+
+  let prev = null;
+  let idx = state.idx;
+  let preload = null; // { idx, promise }
+
+  const buildAt = (i) =>
+    buildYearGroup(bbox, type, cover, state.years[i].year, alive);
+
+  while (alive()) {
+    const yr = state.years[idx].year;
+    const built =
+      preload && preload.idx === idx ? await preload.promise : await buildAt(idx);
+    if (!alive() || !built.group) {
+      dropGroup(built.group);
+      break;
+    }
+
+    if (!built.layers.length) {
+      dropGroup(built.group);
+      idx = idx + 1 > state.years.length - 1 ? 0 : idx + 1;
+      continue; // skip years with no imagery here
+    }
+
+    showBar('indeterminate');
+    await whenSettled(built.layers, PLAY_LOAD_TIMEOUT, (f) =>
+      showBar(Math.round(f * 100))
+    );
+    if (!alive()) {
+      dropGroup(built.group);
+      break;
+    }
+    showBar('hidden');
+
+    setBigYear(yr);
+    await tween(PLAY_FADE_MS, (k) => {
+      if (prev) setGroupOpacity(prev, (1 - k) * state.opacity);
+      setGroupOpacity(built.group, k * state.opacity);
+    });
+    dropGroup(prev);
+    prev = built.group;
+
+    state.idx = idx;
+    updateLabel();
+
+    const nextIdx = idx + 1 > state.years.length - 1 ? 0 : idx + 1;
+    preload = { idx: nextIdx, promise: buildAt(nextIdx) };
+
+    await sleepCancellable(PLAY_DWELL_MS, () => !alive());
+    idx = nextIdx;
+  }
+}
+
+function stopPlayback(restore) {
+  if (!state.playing) return;
+  state.playing = false;
+  playToken++;
+  el('playBtn').textContent = '▶';
+  el('playBtn').title = 'Zeitraffer automatisch abspielen';
+  pbGroups.forEach((g) => map.removeLayer(g));
+  pbGroups.clear();
+  el('bigYear').classList.add('hidden');
+  showBar('hidden');
+  if (restore !== false) loadTiles(); // back to the normal interactive view
+}
+
+function togglePlay() {
+  if (state.playing) stopPlayback(true);
+  else startPlayback();
 }
 
 // --- wiring -----------------------------------------------------------------
@@ -612,10 +790,13 @@ aboutOverlay.addEventListener('click', (ev) => {
   if (ev.target === aboutOverlay) closeAbout(); // backdrop click
 });
 document.addEventListener('keydown', (ev) => {
-  if (ev.key === 'Escape' && !aboutOverlay.classList.contains('hidden')) {
-    closeAbout();
-  }
+  if (ev.key !== 'Escape') return;
+  if (!aboutOverlay.classList.contains('hidden')) closeAbout();
+  else if (state.playing) stopPlayback(true);
 });
+
+// A real user pan/zoom ends the render (the viewport is otherwise frozen).
+map.on('dragstart zoomstart', () => stopPlayback(true));
 
 map.on('moveend zoomend', scheduleRefresh);
 // Recompute the centre spotlight immediately on pan (cheap; reuses the
