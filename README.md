@@ -101,54 +101,48 @@ Browser (Leaflet)  ──►  Node/Express  ──►  geoportal.geoportal-th.de
   set the User-Agent Nominatim requires and avoid CORS.
 
 Footprints come back in EPSG:25832 (UTM 32N) and are reprojected to WGS84 with
-`proj4`. Orthophotos (`op`) are rectified → placed as exact axis-aligned
-overlays, served as the upstream JPEG untouched. Aerial photos (`lb`) are raw
-scans → the server detects the photo content by trimming the dark scan border,
-then applies an alpha mask **at the original pixel proportions** (so the
-footprint registration is unchanged) and returns a WebP capped at 3000 px
-(near the source preview's native size — high enough to stay crisp when you
-zoom in). Edges are kept **essentially hard** (~2 px anti-alias only): the
-source previews are almost always already cropped (border ≈ 0), and feathering
-overlapping frames just cross-dissolves relief-displaced imagery into a blur.
-The mask still widens automatically to cover a real scan border on the rare
-frames that have one. Frames are placed as **rotated overlays using the
-provider's
-footprint ring order** (`corners[0..3]` = the photo's top-left, top-right,
-bottom-right, bottom-left). Earlier a compass-quadrant guess mis-assigned
-corners on any rotated flight line (e.g. around Großschwabhausen); using the
-ring order respects each photo's true flight orientation. Upstream responses
-and processed frames are cached on disk under `.cache/` (7 days / persistent),
-so revisiting is instant.
+`proj4`. **The server does no image processing** — `/api/preview` just caches
+and serves the source preview bytes as-is (for both `op` and `lb`). We used to
+trim the dark scan border + feather + re-encode to WebP with `sharp`, but
+measurements showed the source previews are already cropped (border ≈ 0 on
+2020/1953/1945 samples) and the feather had been reduced to ~2 px, so the
+processed output was visually ≈ the raw image while costing nearly all of the
+server's CPU. Removing it made the server light and dropped the native
+dependency. *Trade-off:* the rare 1940s recon scans that genuinely have a black
+border now show it. Frames are placed as **rotated overlays (lb) / axis-aligned
+overlays (op) using the provider's footprint ring order** (`corners[0..3]` =
+the photo's top-left, top-right, bottom-right, bottom-left; a compass-quadrant
+guess used to mis-place rotated flight lines, e.g. around Großschwabhausen).
+Upstream responses and preview bytes are cached on disk under `.cache/`, so
+revisiting is instant.
 
 **Beste Abdeckung (sharpest covering subset).** Aerial photos overlap heavily
-(60–80 %), so a year can stack 100–230 frames over one town, and feathering
-them together blurs the result. `selectCoverage` lays a fine grid over the
-view and assigns every sample to the frame whose **centre is nearest** — the
-centre of an aerial photo is its sharpest, least relief-displaced part (nadir).
-Frames that win no samples are dropped (coverage is preserved; the count
-typically more than halves), and each kept frame carries a *dominance* = how
-many samples it owns. The client then draws the frames **opaque, least-dominant
-first**, so the most-central (sharpest) frame for every spot ends up on top
-with hard edges — each location shows one crisp photo instead of a soft blend
-of several. A measured focus score (std-dev of a Laplacian, cached in a `.json`
-sidecar) still drives the **spotlight** card's “sharpest image” pick.
+(60–80 %), so a year can stack 100–230 frames over one town. `selectCoverage`
+lays a fine grid over the view and assigns every sample to the frame whose
+**centre is nearest** — the centre of an aerial photo is its sharpest, least
+relief-displaced part (nadir). Frames that win no samples are dropped (coverage
+is preserved; the count typically more than halves), and each kept frame
+carries a *dominance* = how many samples it owns. The client draws the frames
+**opaque, least-dominant first**, so the most-central (sharpest) frame for
+every spot ends up on top — each location shows one crisp photo instead of a
+soft blend of several. The **spotlight** card picks the centre frame by
+nadir-centrality.
 
 ## Things worth knowing
 
 * **First scan of a new area takes a few seconds** (≈80 lightweight year
   probes). It is cached afterwards.
-* **The first time you open a dense aerial-photo year it takes up to ~1 min**
-  to fetch and feather the frames. With **Beste Abdeckung** on (the default)
-  far fewer frames are shown, so it is also noticeably faster. Processed frames
-  are cached on disk, so later visits are instant.
+* Opening a dense aerial-photo year just streams the source previews (no
+  server processing). With **Beste Abdeckung** on (the default) far fewer
+  frames are shown; previews are cached on disk so later visits are instant.
 * Orthophotos are true rectified mosaics and merge seamlessly. Aerial photos
   are placed by an affine (3-point) fit of their footprint corners — verified
-  to land correctly against the current DOP — and blended (trim + adaptive
-  feather + central-coverage selection). It is a clean composite but *not* a
+  to land correctly against the current DOP — and shown as the raw source
+  preview with central-coverage selection. It is a clean composite but *not* a
   survey-grade orthomosaic: because the frames are un-rectified, relief and
   tilt mean adjacent strips can still disagree by a building's width, so faint
-  seams remain. The spotlight card sidesteps this by showing one whole sharp
-  frame for the centre.
+  seams remain (and rare 1940s scans may show a black border). The spotlight
+  card sidesteps this by showing one whole frame for the centre.
 * **What you see on the map is the source *preview* image** (a few thousand
   pixels per frame), not the full-resolution original. It is sharp at normal
   zoom but will soften if you zoom right in. The full-resolution data (e.g.

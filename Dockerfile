@@ -1,7 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# Debian slim (glibc) — sharp ships prebuilt binaries for linux x64/arm64,
-# so no apt/libvips/build tools are needed.
+# Pure-JS server (express + proj4 only — no native deps), so a tiny base works.
 FROM node:20-bookworm-slim
 
 ENV NODE_ENV=production \
@@ -10,8 +9,7 @@ ENV NODE_ENV=production \
 
 WORKDIR /app
 
-# Install deps first for better layer caching. Only runtime deps are declared
-# in package.json (express, proj4, sharp) so --omit=dev is just belt-and-braces.
+# Install deps first for better layer caching (express, proj4 only).
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 

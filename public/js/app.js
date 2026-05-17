@@ -231,7 +231,7 @@ function imageCorners(corners) {
 // Build a single tile overlay (rotated for lb, axis-aligned for op) — shared
 // by the normal load path and the cinematic playback.
 function createTileLayer(p, opacity, interactive) {
-  const src = `/api/preview?type=${p.type}&id=${p.gid}${p.type === 'lb' ? '&v=5' : ''}`;
+  const src = `/api/preview?type=${p.type}&id=${p.gid}${p.type === 'lb' ? '&v=6' : ''}`;
   let layer;
   if (p.type === 'lb' && L.imageOverlay.rotated) {
     const rc = imageCorners(p.corners);
@@ -398,7 +398,7 @@ function updateSpotlight() {
   }
   if (best.gid !== spotGid) {
     spotGid = best.gid;
-    el('spotImg').src = `/api/preview?type=lb&id=${best.gid}&v=5`;
+    el('spotImg').src = `/api/preview?type=lb&id=${best.gid}&v=6`;
     el('spotMeta').innerHTML =
       `<b>${best.year || '–'}</b> · Bildflug ${best.bildflugnr || '–'}` +
       `<br>Bild ${best.bildnr || '–'}` +
@@ -660,7 +660,7 @@ async function renderYearCanvas(feats, cw, ch, sc) {
   for (const f of ordered) {
     if (exportCancel) break;
     const p = f.properties;
-    const src = `/api/preview?type=${p.type}&id=${p.gid}${p.type === 'lb' ? '&v=5' : ''}`;
+    const src = `/api/preview?type=${p.type}&id=${p.gid}${p.type === 'lb' ? '&v=6' : ''}`;
     const img = await loadImage(src);
     if (!img) continue;
     const W = img.naturalWidth;
