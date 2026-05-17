@@ -57,6 +57,77 @@ function setStatus(msg, loading) {
   statusEl.classList.toggle('loading', !!loading);
 }
 
+const progressEl = el('progress');
+const progressBar = el('progressBar');
+let progTimer = null;
+
+// v: 'hidden' | 'indeterminate' | a number 0..100
+function showBar(v) {
+  if (v === 'hidden') {
+    progressEl.classList.add('hidden');
+    progressEl.classList.remove('indeterminate');
+    progressBar.style.width = '0';
+    return;
+  }
+  progressEl.classList.remove('hidden');
+  if (v === 'indeterminate') {
+    progressEl.classList.add('indeterminate');
+    progressBar.style.width = '';
+  } else {
+    progressEl.classList.remove('indeterminate');
+    progressBar.style.width = Math.max(0, Math.min(100, v)) + '%';
+  }
+}
+
+// Poll the actual <img> elements of the current overlays so the user sees
+// real progress while the server is still trimming/feathering frames (the
+// status text otherwise jumped to "done" the moment overlays were added).
+function trackImageProgress(token, layers, finalMsg) {
+  if (progTimer) {
+    clearInterval(progTimer);
+    progTimer = null;
+  }
+  const total = layers.length;
+  if (!total) {
+    showBar('hidden');
+    setStatus(finalMsg);
+    return;
+  }
+  const tick = () => {
+    if (token !== state.tileToken) {
+      clearInterval(progTimer);
+      progTimer = null;
+      return; // a newer load now owns the bar
+    }
+    let settled = 0;
+    let failed = 0;
+    for (const l of layers) {
+      // Rotated overlays put the loading <img> in `_rawImage`; getElement()
+      // there is just the placement DIV. Plain ImageOverlay → getElement().
+      const e = l._rawImage || (l.getElement && l.getElement());
+      if (e && e.tagName === 'IMG' && e.complete) {
+        settled++;
+        if (e.naturalWidth === 0) failed++;
+      }
+    }
+    const pct = Math.round((settled / total) * 100);
+    if (settled < total) {
+      showBar(pct);
+      setStatus(`Verarbeite Bilder … ${pct}% (${settled}/${total})`, true);
+    } else {
+      clearInterval(progTimer);
+      progTimer = null;
+      showBar(100);
+      setTimeout(() => {
+        if (token === state.tileToken) showBar('hidden');
+      }, 450);
+      setStatus(finalMsg + (failed ? ` · ${failed} fehlgeschlagen` : ''));
+    }
+  };
+  tick();
+  progTimer = setInterval(tick, 300);
+}
+
 const productName = () => (state.type === 'op' ? 'Orthophotos' : 'Luftbilder');
 const currentYear = () =>
   state.years.length ? state.years[state.idx].year : null;
@@ -91,6 +162,7 @@ async function refreshYears() {
     outlineLayer.clearLayers();
     state.years = [];
     updateLabel();
+    showBar('hidden');
     setStatus('Zum Laden der Bilder näher heranzoomen (Stadt-/Ortsebene).');
     return;
   }
@@ -98,6 +170,7 @@ async function refreshYears() {
   const token = ++state.yearsToken;
   const prevYear = currentYear();
   setStatus(`Suche ${productName()} …`, true);
+  showBar('indeterminate');
 
   let data;
   try {
@@ -105,7 +178,10 @@ async function refreshYears() {
       `/api/years?bbox=${viewportBbox()}&type=${state.type}`
     ).then((r) => r.json());
   } catch {
-    if (token === state.yearsToken) setStatus('Fehler beim Laden der Daten.');
+    if (token === state.yearsToken) {
+      showBar('hidden');
+      setStatus('Fehler beim Laden der Daten.');
+    }
     return;
   }
   if (token !== state.yearsToken) return; // superseded by a newer viewport
@@ -115,6 +191,7 @@ async function refreshYears() {
     imageryLayer.clearLayers();
     outlineLayer.clearLayers();
     updateLabel();
+    showBar('hidden');
     setStatus(`Keine ${productName()} in diesem Bereich.`);
     return;
   }
@@ -155,7 +232,12 @@ async function loadTiles() {
   if (y == null) return;
 
   const token = ++state.tileToken;
+  if (progTimer) {
+    clearInterval(progTimer);
+    progTimer = null;
+  }
   setStatus(`Lade ${y} …`, true);
+  showBar('indeterminate');
 
   const useCover = state.type === 'lb' && state.cover;
   let fc;
@@ -165,7 +247,10 @@ async function loadTiles() {
         (useCover ? '&cover=1' : '')
     ).then((r) => r.json());
   } catch {
-    if (token === state.tileToken) setStatus('Fehler beim Laden der Bilder.');
+    if (token === state.tileToken) {
+      showBar('hidden');
+      setStatus('Fehler beim Laden der Bilder.');
+    }
     return;
   }
   if (token !== state.tileToken) return;
@@ -176,6 +261,7 @@ async function loadTiles() {
   const feats = (fc && fc.features) || [];
   state.features = feats;
   if (!feats.length) {
+    showBar('hidden');
     setStatus(`Keine ${productName()} für ${y} in diesem Bereich.`);
     updateSpotlight();
     return;
@@ -187,6 +273,7 @@ async function loadTiles() {
     .slice()
     .sort((a, b) => (a.properties.quality || 0) - (b.properties.quality || 0));
 
+  const layers = [];
   for (const f of ordered) {
     const p = f.properties;
     // `v` busts the browser cache when the lb processing pipeline changes.
@@ -221,6 +308,7 @@ async function loadTiles() {
        </div>`
     );
     imageryLayer.addLayer(layer);
+    layers.push(layer);
     if (p.quality != null && layer.setZIndex) layer.setZIndex(Math.round(p.quality));
 
     if (state.showOutlines) {
@@ -237,13 +325,14 @@ async function loadTiles() {
     }
   }
 
-  if (useCover && fc.total > feats.length) {
-    setStatus(
-      `${y} · ${feats.length} schärfste Bilder (von ${fc.total}) – Fläche abgedeckt`
-    );
-  } else {
-    setStatus(`${y} · ${feats.length} ${productName()}-Kacheln zusammengesetzt`);
-  }
+  const finalMsg =
+    useCover && fc.total > feats.length
+      ? `${y} · ${feats.length} schärfste Bilder (von ${fc.total}) – Fläche abgedeckt`
+      : `${y} · ${feats.length} ${productName()}-Kacheln zusammengesetzt`;
+
+  // Keep the bar/percent live until the frames have actually loaded
+  // (server-side processing can lag well behind overlay creation).
+  trackImageProgress(token, layers, finalMsg);
   updateSpotlight();
 }
 
