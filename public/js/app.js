@@ -226,6 +226,90 @@ function imageCorners(corners) {
   return area > 1e-9 ? [tl, tr, bl] : null;
 }
 
+// --- seamline mosaic --------------------------------------------------------
+//
+// Aerial frames overlap heavily; drawn opaque the top one just hides the rest.
+// Instead clip every lb frame to the region where ITS centre is the closest
+// among the loaded frames (a Voronoi cell ∩ its own footprint). Result: no
+// overlap/hiding — each ground point shows the most-central (sharpest) photo,
+// joined along thin seams. Pure client-side geometry (n² over ≤~80 frames).
+
+function clipHalfPlane(poly, mx, my, nx, ny) {
+  // keep vertices on the side of the bisector nearer this frame's centre:
+  // (P - M)·n <= 0
+  const out = [];
+  for (let k = 0; k < poly.length; k++) {
+    const A = poly[k];
+    const B = poly[(k + 1) % poly.length];
+    const dA = (A[0] - mx) * nx + (A[1] - my) * ny;
+    const dB = (B[0] - mx) * nx + (B[1] - my) * ny;
+    if (dA <= 0) out.push(A);
+    if (dA <= 0 !== dB <= 0) {
+      const t = dA / (dA - dB);
+      out.push([A[0] + t * (B[0] - A[0]), A[1] + t * (B[1] - A[1])]);
+    }
+  }
+  return out;
+}
+
+// Sets p._cell on every lb feature: the Voronoi cell as a lon/lat ring, or
+// null if the frame is fully dominated (skip it entirely).
+function assignSeamCells(feats) {
+  const lb = feats.filter((f) => f.properties.type === 'lb');
+  if (!lb.length) return;
+  let latSum = 0;
+  for (const f of lb) latSum += f.geometry.coordinates[0][0][1];
+  const kx = Math.cos(((latSum / lb.length) * Math.PI) / 180);
+  const info = lb.map((f) => {
+    const ring = f.geometry.coordinates[0]
+      .slice(0, 4)
+      .map(([lng, lat]) => [lng * kx, lat]);
+    let cx = 0;
+    let cy = 0;
+    for (const v of ring) {
+      cx += v[0];
+      cy += v[1];
+    }
+    return { f, ring, cx: cx / ring.length, cy: cy / ring.length };
+  });
+  for (const a of info) {
+    let cell = a.ring;
+    for (const b of info) {
+      if (b === a || cell.length < 3) continue;
+      const mx = (a.cx + b.cx) / 2;
+      const my = (a.cy + b.cy) / 2;
+      cell = clipHalfPlane(cell, mx, my, b.cx - a.cx, b.cy - a.cy);
+    }
+    a.f.properties._cell =
+      cell.length >= 3 ? cell.map(([x, y]) => [x / kx, y]) : null;
+  }
+}
+
+// The Voronoi cell (lon/lat) → CSS clip-path in the frame image's own
+// coordinate space, via the inverse of the image→latlng affine. View-
+// independent, so it survives pan/zoom without recompute.
+function cellClipPath(p) {
+  const cell = p._cell;
+  if (!cell || !p.corners || p.corners.length < 4) return null;
+  const tl = p.corners[0]; // [lat,lng]
+  const tr = p.corners[1];
+  const bl = p.corners[3];
+  const e1x = tr[1] - tl[1];
+  const e1y = tr[0] - tl[0];
+  const e2x = bl[1] - tl[1];
+  const e2y = bl[0] - tl[0];
+  const det = e1x * e2y - e2x * e1y;
+  if (!det) return null;
+  const pts = cell.map(([lng, lat]) => {
+    const dx = lng - tl[1];
+    const dy = lat - tl[0];
+    const u = (dx * e2y - e2x * dy) / det;
+    const v = (e1x * dy - dx * e1y) / det;
+    return `${(u * 100).toFixed(3)}% ${(v * 100).toFixed(3)}%`;
+  });
+  return `polygon(${pts.join(',')})`;
+}
+
 // --- per-year tile mosaic ---------------------------------------------------
 
 // Build a single tile overlay (rotated for lb, axis-aligned for op) — shared
@@ -247,6 +331,22 @@ function createTileLayer(p, opacity, interactive) {
   }
   if (!layer) layer = L.imageOverlay(src, p.bounds, { opacity, interactive });
   if (p.quality != null && layer.setZIndex) layer.setZIndex(Math.round(p.quality));
+
+  // Seamline clip: restrict this lb frame to its Voronoi cell so it never
+  // hides a neighbour. clip-path is in the image's own coords (view-
+  // independent), applied to the element the plugin transforms.
+  if (p.type === 'lb' && p._cell !== undefined) {
+    const cp = p._cell ? cellClipPath(p) : 'inset(100%)'; // null cell → hide
+    const apply = () => {
+      const im = layer._rawImage || (layer.getElement && layer.getElement());
+      if (im && cp) {
+        im.style.clipPath = cp;
+        im.style.webkitClipPath = cp;
+      }
+    };
+    apply();
+    layer.on('load', apply);
+  }
   return layer;
 }
 
@@ -290,8 +390,9 @@ async function loadTiles() {
     return;
   }
 
-  // Draw the least-dominant frames first so the most-central (sharpest) frame
-  // for each spot ends up on top — opaque, no cross-dissolve blur.
+  // Each lb frame is clipped to its Voronoi cell, so the order no longer
+  // matters for hiding; least-dominant first just keeps z-order stable.
+  assignSeamCells(feats);
   const ordered = feats
     .slice()
     .sort((a, b) => (a.properties.quality || 0) - (b.properties.quality || 0));
@@ -299,6 +400,7 @@ async function loadTiles() {
   const layers = [];
   for (const f of ordered) {
     const p = f.properties;
+    if (p._cell === null) continue; // fully dominated → contributes nothing
     const layer = createTileLayer(p, state.opacity, true);
 
     layer.bindPopup(
@@ -495,12 +597,14 @@ async function buildYearGroup(bbox, type, cover, year, isValid) {
   // Playback was stopped while this (possibly pre-)load was in flight — don't
   // attach an orphan group to the map.
   if (isValid && !isValid()) return { group: null, layers: [] };
+  assignSeamCells(feats);
   const group = L.layerGroup();
   const layers = [];
   feats
     .slice()
     .sort((a, b) => (a.properties.quality || 0) - (b.properties.quality || 0))
     .forEach((f) => {
+      if (f.properties._cell === null) return;
       const layer = createTileLayer(f.properties, 0, false);
       group.addLayer(layer);
       layers.push(layer);
@@ -749,12 +853,14 @@ async function renderYearCanvas(feats, cw, ch, sc) {
   const x = c.getContext('2d');
   x.fillStyle = '#1a1d23';
   x.fillRect(0, 0, cw, ch);
+  assignSeamCells(feats);
   const ordered = feats
     .slice()
     .sort((a, b) => (a.properties.quality || 0) - (b.properties.quality || 0));
   for (const f of ordered) {
     if (exportCancel) break;
     const p = f.properties;
+    if (p._cell === null) continue; // fully dominated → contributes nothing
     const src = `/api/preview?type=${p.type}&id=${p.gid}${p.type === 'lb' ? '&v=6' : ''}`;
     const img = await loadImage(src);
     if (!img) continue;
@@ -773,6 +879,18 @@ async function renderYearCanvas(feats, cw, ch, sc) {
       const cy = ((P2.y - P0.y) * sc) / H;
       const ft = featherLbTile(img);
       x.save();
+      // Clip to this frame's Voronoi cell (screen coords, identity transform)
+      // so frames tessellate instead of overlapping/hiding.
+      if (p._cell && p._cell.length >= 3) {
+        x.beginPath();
+        p._cell.forEach(([lng, lat], k) => {
+          const Q = map.latLngToContainerPoint(L.latLng(lat, lng));
+          if (k) x.lineTo(Q.x * sc, Q.y * sc);
+          else x.moveTo(Q.x * sc, Q.y * sc);
+        });
+        x.closePath();
+        x.clip();
+      }
       if (ft) {
         // content-canvas px → original px: (ox + i/scaleF, oy + j/scaleF)
         x.setTransform(
