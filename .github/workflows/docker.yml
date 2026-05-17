@@ -48,12 +48,15 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          # arm64 is built under emulation; sharp uses per-arch prebuilt
-          # binaries so there is no native compile. Drop arm64 if you only
-          # run amd64 servers and want faster CI.
-          platforms: linux/amd64,linux/arm64
+          # amd64 only: faster, and avoids the arm64-under-QEMU failure class.
+          # Add linux/arm64 back here if you deploy on ARM servers.
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Plain single-manifest image (no provenance/SBOM attestations) —
+          # easiest to pull and to flip "public" on locked-down orgs.
+          provenance: false
+          sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
