@@ -548,6 +548,7 @@ body {
   margin: 0 0 22px;
   color: var(--text);
   font-size: 16px;
+  text-align: center;
 }
 
 #aboutCard .about-by .heart {
