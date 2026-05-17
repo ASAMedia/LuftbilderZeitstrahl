@@ -497,6 +497,28 @@ body {
   line-height: 1;
 }
 
+#exportBtn {
+  flex: none;
+  border: 1px solid #333a45;
+  background: #232936;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#exportBtn:hover {
+  border-color: var(--accent);
+}
+
+#exportBtn.busy {
+  background: var(--accent);
+  color: #1a1d23;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
 #aboutBtn:hover {
   border-color: var(--accent);
   color: var(--text);

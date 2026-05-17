@@ -152,7 +152,7 @@ function viewportBbox() {
 
 let yearsTimer = null;
 function scheduleRefresh() {
-  if (state.playing) return; // viewport is frozen during a timeline render
+  if (state.playing || exporting) return; // viewport frozen during render/export
   clearTimeout(yearsTimer);
   yearsTimer = setTimeout(refreshYears, 350);
 }
@@ -612,6 +612,280 @@ function togglePlay() {
   else startPlayback();
 }
 
+// --- video export (in-browser recorder) ------------------------------------
+// Renders every year for the CURRENT viewport onto an off-screen canvas,
+// cross-fades between them with the big year baked in, and records the canvas
+// stream to a downloadable file. Same-origin previews keep the canvas
+// un-tainted; no OSM basemap is drawn (it would taint it) so gaps are dark.
+
+const EXPORT_FPS = 30;
+const EXPORT_FADE_MS = 850;
+const EXPORT_HOLD_MS = 1750;
+let exporting = false;
+let exportCancel = false;
+
+function pickMime() {
+  const cands = [
+    'video/mp4;codecs=avc1.640028',
+    'video/mp4',
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm',
+  ];
+  if (!window.MediaRecorder) return '';
+  return cands.find((m) => MediaRecorder.isTypeSupported(m)) || '';
+}
+
+const loadImage = (src) =>
+  new Promise((resolve) => {
+    const im = new Image();
+    im.crossOrigin = 'anonymous';
+    im.onload = () => resolve(im);
+    im.onerror = () => resolve(null);
+    im.src = src;
+  });
+
+// Draw one year's tiles onto its own full-size canvas using the (frozen)
+// current map projection — same ordering/placement as the live mosaic.
+async function renderYearCanvas(feats, cw, ch, sc) {
+  const c = document.createElement('canvas');
+  c.width = cw;
+  c.height = ch;
+  const x = c.getContext('2d');
+  x.fillStyle = '#1a1d23';
+  x.fillRect(0, 0, cw, ch);
+  const ordered = feats
+    .slice()
+    .sort((a, b) => (a.properties.quality || 0) - (b.properties.quality || 0));
+  for (const f of ordered) {
+    if (exportCancel) break;
+    const p = f.properties;
+    const src = `/api/preview?type=${p.type}&id=${p.gid}${p.type === 'lb' ? '&v=5' : ''}`;
+    const img = await loadImage(src);
+    if (!img) continue;
+    const W = img.naturalWidth;
+    const H = img.naturalHeight;
+    if (p.type === 'lb' && p.corners && p.corners.length >= 4) {
+      const rc = imageCorners(p.corners);
+      if (!rc) continue;
+      const P0 = map.latLngToContainerPoint(L.latLng(rc[0]));
+      const P1 = map.latLngToContainerPoint(L.latLng(rc[1]));
+      const P2 = map.latLngToContainerPoint(L.latLng(rc[2]));
+      x.save();
+      x.setTransform(
+        ((P1.x - P0.x) * sc) / W,
+        ((P1.y - P0.y) * sc) / W,
+        ((P2.x - P0.x) * sc) / H,
+        ((P2.y - P0.y) * sc) / H,
+        P0.x * sc,
+        P0.y * sc
+      );
+      x.drawImage(img, 0, 0);
+      x.restore();
+    } else {
+      const b = p.bounds; // [[s,w],[n,e]]
+      const tl = map.latLngToContainerPoint(L.latLng(b[1][0], b[0][1]));
+      const br = map.latLngToContainerPoint(L.latLng(b[0][0], b[1][1]));
+      x.drawImage(
+        img,
+        tl.x * sc,
+        tl.y * sc,
+        (br.x - tl.x) * sc,
+        (br.y - tl.y) * sc
+      );
+    }
+  }
+  return c;
+}
+
+function paintFrame(ctx, cw, ch, prev, cur, curAlpha, year, popK) {
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#1a1d23';
+  ctx.fillRect(0, 0, cw, ch);
+  if (prev) {
+    ctx.globalAlpha = 1 - curAlpha;
+    ctx.drawImage(prev, 0, 0);
+  }
+  if (cur) {
+    ctx.globalAlpha = curAlpha;
+    ctx.drawImage(cur, 0, 0);
+  }
+  ctx.globalAlpha = 1;
+  // big year
+  const fs = Math.round(ch * 0.075);
+  const k = Math.min(1, popK * 1.4);
+  ctx.save();
+  ctx.globalAlpha = k;
+  ctx.translate(cw / 2, ch - ch * 0.06);
+  ctx.scale(0.92 + 0.08 * k, 0.92 + 0.08 * k);
+  ctx.font = `800 ${fs}px "Segoe UI", system-ui, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = 'rgba(0,0,0,0.85)';
+  ctx.shadowBlur = ch * 0.02;
+  ctx.fillStyle = '#fff';
+  ctx.fillText(String(year), 0, 0);
+  ctx.restore();
+  // attribution baked into the file
+  ctx.globalAlpha = 0.7;
+  ctx.font = `${Math.round(ch * 0.02)}px "Segoe UI", system-ui, sans-serif`;
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#fff';
+  ctx.shadowColor = 'rgba(0,0,0,0.8)';
+  ctx.shadowBlur = 4;
+  ctx.fillText('© GDI-Th · Luftbilder-Zeitstrahl', ch * 0.02, ch - ch * 0.02);
+  ctx.globalAlpha = 1;
+  ctx.shadowBlur = 0;
+}
+
+const raf = () => new Promise((r) => requestAnimationFrame(r));
+
+async function exportVideo() {
+  if (exporting) {
+    exportCancel = true;
+    return;
+  }
+  if (!state.years.length || map.getZoom() < MIN_ZOOM) {
+    setStatus('Zum Export bitte näher heranzoomen.');
+    return;
+  }
+  const mime = pickMime();
+  if (!mime) {
+    setStatus('Video-Export wird von diesem Browser nicht unterstützt.');
+    return;
+  }
+  if (state.playing) stopPlayback(false);
+
+  exporting = true;
+  exportCancel = false;
+  const btn = el('exportBtn');
+  btn.classList.add('busy');
+  btn.textContent = '■ Stop';
+  spotEl.classList.add('hidden');
+
+  const type = state.type;
+  const cover = type === 'lb' && state.cover;
+  const bbox = viewportBbox();
+  const years = state.years.map((y) => y.year);
+
+  const size = map.getSize();
+  const sc = Math.min(
+    2,
+    Math.max(1, Math.floor(2560 / Math.max(1, size.x)))
+  ) || 1;
+  const cw = Math.round((size.x * sc) / 2) * 2;
+  const ch = Math.round((size.y * sc) / 2) * 2;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = cw;
+  canvas.height = ch;
+  const ctx = canvas.getContext('2d');
+  paintFrame(ctx, cw, ch, null, null, 0, '', 0);
+
+  const bitrate = Math.min(
+    20_000_000,
+    Math.round(cw * ch * EXPORT_FPS * 0.12)
+  );
+  const stream = canvas.captureStream(EXPORT_FPS);
+  const chunks = [];
+  const rec = new MediaRecorder(stream, {
+    mimeType: mime,
+    videoBitsPerSecond: bitrate,
+  });
+  rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+  const stopped = new Promise((r) => (rec.onstop = r));
+  rec.start();
+
+  let prev = null;
+  let done = 0;
+  const renderedYears = [];
+  for (let i = 0; i < years.length && !exportCancel; i++) {
+    const yr = years[i];
+    setStatus(`Video: ${yr} wird geladen … (${i + 1}/${years.length})`, true);
+    showBar(Math.round((i / years.length) * 100));
+    let feats = [];
+    try {
+      const fc = await fetch(
+        `/api/tiles?bbox=${bbox}&type=${type}&from=${yr}&to=${yr}` +
+          (cover ? '&cover=1' : '')
+      ).then((r) => r.json());
+      feats = (fc && fc.features) || [];
+    } catch {
+      /* skip */
+    }
+    if (exportCancel) break;
+    if (!feats.length) continue; // no imagery here this year
+    const cur = await renderYearCanvas(feats, cw, ch, sc);
+    if (exportCancel) break;
+    renderedYears.push(yr);
+
+    const fadeMs = prev ? EXPORT_FADE_MS : 600;
+    const total = fadeMs + EXPORT_HOLD_MS;
+    const t0 = performance.now();
+    for (;;) {
+      if (exportCancel) break;
+      const e = performance.now() - t0;
+      const a = Math.min(1, e / fadeMs);
+      paintFrame(ctx, cw, ch, prev, cur, a, yr, a);
+      if (e >= total) break;
+      await raf();
+    }
+    prev = cur;
+    done = i + 1;
+    setStatus(`Video aufgenommen: ${done}/${years.length} Jahre`, true);
+  }
+
+  // brief tail so the last year isn't cut off
+  if (!exportCancel && prev) {
+    const t0 = performance.now();
+    while (performance.now() - t0 < 500) {
+      paintFrame(
+        ctx,
+        cw,
+        ch,
+        prev,
+        prev,
+        1,
+        renderedYears[renderedYears.length - 1],
+        1
+      );
+      await raf();
+    }
+  }
+
+  rec.stop();
+  await stopped;
+  showBar('hidden');
+  btn.classList.remove('busy');
+  btn.textContent = '● Video';
+  exporting = false;
+
+  if (exportCancel || !chunks.length) {
+    exportCancel = false;
+    setStatus('Video-Export abgebrochen.');
+    updateSpotlight(); // the live map was untouched; just restore the spotlight
+    return;
+  }
+  const ext = mime.includes('mp4') ? 'mp4' : 'webm';
+  const blob = new Blob(chunks, { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `luftbilder-zeitstrahl-${type}-${renderedYears[0]}-${
+    renderedYears[renderedYears.length - 1]
+  }.${ext}`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  setStatus(
+    `Video gespeichert (${renderedYears.length} Jahre, ${Math.round(
+      blob.size / 1048576
+    )} MB).`
+  );
+  updateSpotlight(); // the live map was untouched; just restore the spotlight
+}
+
 // --- wiring -----------------------------------------------------------------
 
 // "Beste Abdeckung" only applies to overlapping aerial frames (lb); for
@@ -640,6 +914,7 @@ slider.addEventListener('input', (e) => setIdx(parseInt(e.target.value, 10)));
 el('prevBtn').addEventListener('click', () => setIdx(state.idx - 1));
 el('nextBtn').addEventListener('click', () => setIdx(state.idx + 1));
 el('playBtn').addEventListener('click', togglePlay);
+el('exportBtn').addEventListener('click', exportVideo);
 
 el('opacity').addEventListener('input', (e) => {
   state.opacity = parseFloat(e.target.value);
@@ -792,11 +1067,15 @@ aboutOverlay.addEventListener('click', (ev) => {
 document.addEventListener('keydown', (ev) => {
   if (ev.key !== 'Escape') return;
   if (!aboutOverlay.classList.contains('hidden')) closeAbout();
+  else if (exporting) exportCancel = true;
   else if (state.playing) stopPlayback(true);
 });
 
-// A real user pan/zoom ends the render (the viewport is otherwise frozen).
-map.on('dragstart zoomstart', () => stopPlayback(true));
+// A real user pan/zoom ends a render/export (the viewport is otherwise frozen).
+map.on('dragstart zoomstart', () => {
+  if (exporting) exportCancel = true;
+  stopPlayback(true);
+});
 
 map.on('moveend zoomend', scheduleRefresh);
 // Recompute the centre spotlight immediately on pan (cheap; reuses the
