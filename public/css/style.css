@@ -532,9 +532,16 @@ body {
 }
 
 #aboutCard .about-sub {
-  margin: 6px 0 20px;
+  margin: 6px 0 14px;
   color: var(--muted);
   font-size: 16px;
+}
+
+#aboutCard .about-info {
+  margin: 0 0 20px;
+  color: var(--muted);
+  font-size: 13.5px;
+  line-height: 1.55;
 }
 
 #aboutCard .about-by {
