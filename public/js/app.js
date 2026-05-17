@@ -777,8 +777,16 @@ async function exportVideo() {
   const ch = Math.round((size.y * sc) / 2) * 2;
 
   const canvas = document.createElement('canvas');
+  canvas.id = 'expCanvas';
   canvas.width = cw;
   canvas.height = ch;
+  // MUST be in the DOM and actually composited — a detached/display:none
+  // canvas makes captureStream() record all-black frames in Chromium. Keep it
+  // rendered but visually out of the way.
+  canvas.style.cssText =
+    'position:fixed;left:0;bottom:0;width:2px;height:2px;opacity:0.01;' +
+    'pointer-events:none;z-index:-1;';
+  document.body.appendChild(canvas);
   const ctx = canvas.getContext('2d');
   paintFrame(ctx, cw, ch, null, null, 0, '', 0);
 
@@ -787,6 +795,8 @@ async function exportVideo() {
     Math.round(cw * ch * EXPORT_FPS * 0.12)
   );
   const stream = canvas.captureStream(EXPORT_FPS);
+  const vtrack = stream.getVideoTracks()[0];
+  const pushFrame = () => vtrack && vtrack.requestFrame && vtrack.requestFrame();
   const chunks = [];
   const rec = new MediaRecorder(stream, {
     mimeType: mime,
@@ -796,6 +806,7 @@ async function exportVideo() {
   const stopped = new Promise((r) => (rec.onstop = r));
   rec.start();
 
+  try {
   let prev = null;
   let done = 0;
   const renderedYears = [];
@@ -827,6 +838,7 @@ async function exportVideo() {
       const e = performance.now() - t0;
       const a = Math.min(1, e / fadeMs);
       paintFrame(ctx, cw, ch, prev, cur, a, yr, a);
+      pushFrame();
       if (e >= total) break;
       await raf();
     }
@@ -849,16 +861,13 @@ async function exportVideo() {
         renderedYears[renderedYears.length - 1],
         1
       );
+      pushFrame();
       await raf();
     }
   }
 
-  rec.stop();
+  if (rec.state !== 'inactive') rec.stop();
   await stopped;
-  showBar('hidden');
-  btn.classList.remove('busy');
-  btn.textContent = '● Video';
-  exporting = false;
 
   if (exportCancel || !chunks.length) {
     exportCancel = false;
@@ -884,6 +893,18 @@ async function exportVideo() {
     )} MB).`
   );
   updateSpotlight(); // the live map was untouched; just restore the spotlight
+  } finally {
+    try {
+      if (rec.state !== 'inactive') rec.stop();
+    } catch {
+      /* already stopped */
+    }
+    canvas.remove();
+    showBar('hidden');
+    btn.classList.remove('busy');
+    btn.textContent = '● Video';
+    exporting = false;
+  }
 }
 
 // --- wiring -----------------------------------------------------------------
