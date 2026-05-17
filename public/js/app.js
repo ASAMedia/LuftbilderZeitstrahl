@@ -208,18 +208,43 @@ async function refreshYears() {
 
 // --- corner mapping for rotated (Luftbild) overlays ------------------------
 
-// The source footprint ring is ordered to the photo's own corners:
-// corners[0..3] = image top-left, top-right, bottom-right, bottom-left
-// (verified against axis-aligned frames; rotated campaigns keep the same order,
-// which is why their footprints look "turned" — that is the true flight
-// orientation). L.imageOverlay.rotated wants topleft, topright, bottomleft.
-// A compass-quadrant guess (the previous approach) mis-assigned corners on any
-// rotated frame, e.g. around Großschwabhausen.
-function imageCorners(corners) {
+// Returns the footprint's [topLeft, topRight, bottomLeft] in IMAGE space for
+// L.imageOverlay.rotated. op and lb need different logic:
+//
+// • lb (raw aerial film): the preview is in the photo's own flight
+//   orientation, NOT north-up, so cardinal logic fails on rotated frames.
+//   The provider's ring is ordered to the photo's corners — corners[0..3] =
+//   TL,TR,BR,BL — so use those indices (user-verified: lb lines up perfectly).
+//
+// • op (rectified orthophoto): the preview IS north-up, and the op ring is
+//   ordered differently (SW,NW,NE,SE). So just classify the four corners by
+//   compass quadrant — exact for a near-axis-aligned, north-up tile and immune
+//   to ring-order differences between datasets/years.
+function imageCorners(corners, type) {
   if (!corners || corners.length < 4) return null;
-  const tl = corners[0];
-  const tr = corners[1];
-  const bl = corners[3];
+  let tl;
+  let tr;
+  let bl;
+  if (type === 'op') {
+    const clat = (corners[0][0] + corners[1][0] + corners[2][0] + corners[3][0]) / 4;
+    const clng = (corners[0][1] + corners[1][1] + corners[2][1] + corners[3][1]) / 4;
+    for (const c of corners) {
+      const north = c[0] >= clat;
+      const west = c[1] <= clng;
+      if (north && west) tl = c;
+      else if (north && !west) tr = c;
+      else if (!north && west) bl = c;
+    }
+    if (!tl || !tr || !bl) {
+      tl = corners[1]; // fallback to the observed op ring order
+      tr = corners[2];
+      bl = corners[0];
+    }
+  } else {
+    tl = corners[0];
+    tr = corners[1];
+    bl = corners[3];
+  }
   // reject degenerate footprints (avoids a NaN/zero-area overlay)
   const area = Math.abs(
     (tr[1] - tl[1]) * (bl[0] - tl[0]) - (tr[0] - tl[0]) * (bl[1] - tl[1])
@@ -239,7 +264,7 @@ function createTileLayer(p, opacity, interactive) {
   // the old axis-aligned bounding-box placement inflated every tile ~2.5% and
   // un-rotated it, so orthophotos didn't line up (within a year or across
   // years). Corner placement is exact → they register.
-  const rc = L.imageOverlay.rotated && imageCorners(p.corners);
+  const rc = L.imageOverlay.rotated && imageCorners(p.corners, p.type);
   if (rc) {
     layer = L.imageOverlay.rotated(
       src,
@@ -804,7 +829,7 @@ async function renderYearCanvas(feats, cw, ch, sc) {
     if (!img) continue;
     const W = img.naturalWidth;
     const H = img.naturalHeight;
-    const rc = imageCorners(p.corners);
+    const rc = imageCorners(p.corners, p.type);
     if (rc) {
       const P0 = map.latLngToContainerPoint(L.latLng(rc[0]));
       const P1 = map.latLngToContainerPoint(L.latLng(rc[1]));
