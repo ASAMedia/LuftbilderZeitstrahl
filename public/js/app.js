@@ -593,6 +593,30 @@ document.addEventListener('click', (ev) => {
   if (!ev.target.closest('.search')) closeSearch();
 });
 
+// --- info / Impressum modal -------------------------------------------------
+
+const aboutOverlay = el('aboutOverlay');
+el('aboutYear').textContent = new Date().getFullYear();
+
+function openAbout() {
+  aboutOverlay.classList.remove('hidden');
+}
+function closeAbout() {
+  aboutOverlay.classList.add('hidden');
+}
+
+el('aboutBtn').addEventListener('click', openAbout);
+el('aboutLink').addEventListener('click', openAbout);
+el('aboutClose').addEventListener('click', closeAbout);
+aboutOverlay.addEventListener('click', (ev) => {
+  if (ev.target === aboutOverlay) closeAbout(); // backdrop click
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && !aboutOverlay.classList.contains('hidden')) {
+    closeAbout();
+  }
+});
+
 map.on('moveend zoomend', scheduleRefresh);
 // Recompute the centre spotlight immediately on pan (cheap; reuses the
 // already-loaded features until the debounced reload catches up).
