@@ -680,9 +680,24 @@ async function startPlayback() {
     showBar('hidden');
 
     setBigYear(yr);
+    // Orthophotos are rectified → they truly register across years, so
+    // cross-dissolve. Raw Luftbilder do NOT register (tilt/relief differ per
+    // epoch); cross-dissolving them looks like a broken morph, so instead fade
+    // the old year out THROUGH the dark background, then the new year in — the
+    // two misaligned years are never on screen together.
+    const lbSeq = type === 'lb';
     await tween(PLAY_FADE_MS, (k) => {
-      if (prev) setGroupOpacity(prev, (1 - k) * state.opacity);
-      setGroupOpacity(built.group, k * state.opacity);
+      let pa;
+      let na;
+      if (lbSeq) {
+        pa = Math.max(0, 1 - 2 * k);
+        na = Math.max(0, 2 * k - 1);
+      } else {
+        pa = 1 - k;
+        na = k;
+      }
+      if (prev) setGroupOpacity(prev, pa * state.opacity);
+      setGroupOpacity(built.group, na * state.opacity);
     });
     dropGroup(prev);
     prev = built.group;
@@ -923,16 +938,28 @@ async function renderYearCanvas(feats, cw, ch, sc) {
   return c;
 }
 
-function paintFrame(ctx, cw, ch, prev, cur, curAlpha, year, popK) {
+function paintFrame(ctx, cw, ch, prev, cur, curAlpha, year, popK, crossfade) {
   ctx.globalAlpha = 1;
   ctx.fillStyle = '#1a1d23';
   ctx.fillRect(0, 0, cw, ch);
+  // op: true cross-dissolve (rectified, registers across years).
+  // lb: fade prev out THROUGH dark, then cur in — never blend two
+  // misaligned epochs (a raw-aerial cross-dissolve looks like a broken morph).
+  let pAlpha;
+  let cAlpha;
+  if (crossfade) {
+    pAlpha = 1 - curAlpha;
+    cAlpha = curAlpha;
+  } else {
+    pAlpha = Math.max(0, 1 - 2 * curAlpha);
+    cAlpha = Math.max(0, 2 * curAlpha - 1);
+  }
   if (prev) {
-    ctx.globalAlpha = 1 - curAlpha;
+    ctx.globalAlpha = pAlpha;
     ctx.drawImage(prev, 0, 0);
   }
   if (cur) {
-    ctx.globalAlpha = curAlpha;
+    ctx.globalAlpha = cAlpha;
     ctx.drawImage(cur, 0, 0);
   }
   ctx.globalAlpha = 1;
@@ -990,6 +1017,7 @@ async function exportVideo() {
 
   const type = state.type;
   const cover = type === 'lb' && state.cover;
+  const crossfade = type === 'op'; // lb fades through dark instead (no morph)
   const bbox = viewportBbox();
   const years = state.years.map((y) => y.year);
 
@@ -1062,7 +1090,7 @@ async function exportVideo() {
       if (exportCancel) break;
       const e = performance.now() - t0;
       const a = Math.min(1, e / fadeMs);
-      paintFrame(ctx, cw, ch, prev, cur, a, yr, a);
+      paintFrame(ctx, cw, ch, prev, cur, a, yr, a, crossfade);
       pushFrame();
       if (e >= total) break;
       await raf();
@@ -1084,7 +1112,8 @@ async function exportVideo() {
         prev,
         1,
         renderedYears[renderedYears.length - 1],
-        1
+        1,
+        crossfade
       );
       pushFrame();
       await raf();
