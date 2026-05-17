@@ -1,16 +1,21 @@
-# Run on your own server:
-#   1. copy .env.example -> .env and set IMAGE (+ HOST_PORT if you like)
-#   2. docker compose pull        # fetch the image GitHub built & pushed
+# Pull-and-run (Dockge, or any server with just this file):
+#   1. (optional) copy .env.example -> .env to override IMAGE / HOST_PORT
+#   2. docker compose pull
 #   3. docker compose up -d
 #
-# Local build instead of pulling:  docker compose build && docker compose up -d
+# This file is intentionally PULL-ONLY (no `build:`) — with a `build:` section,
+# `docker compose up` tries to build from the stack folder, which in Dockge
+# contains only this compose file (no Dockerfile/source) and fails. To build
+# from a full checkout instead, add the override:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml build
 
 services:
   app:
     # Image published by the GitHub Actions workflow (see .github/workflows).
-    # `build: .` lets `docker compose build` produce the same image locally.
-    image: ${IMAGE:-ghcr.io/OWNER/luftbilder-zeitstrahl:latest}
-    build: .
+    # Docker image refs MUST be lowercase: GitHub repo ASAMedia/LuftbilderZeitstrahl
+    # → ghcr.io/asamedia/luftbilderzeitstrahl. Override via the IMAGE env if your
+    # fork lives elsewhere.
+    image: ${IMAGE:-ghcr.io/asamedia/luftbilderzeitstrahl:latest}
     restart: unless-stopped
     # Host port 3222 (3000 is taken on the target server); the container
     # itself still listens on 3000 inside its own network namespace.

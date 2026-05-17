@@ -27,12 +27,14 @@ Requires Node ≥ 18 (developed on Node 23).
 
 GitHub Actions builds and pushes a multi-arch image to the GitHub Container
 Registry on every push to `main`/`master` and on `v*` tags
-(`.github/workflows/docker.yml`). Image name: `ghcr.io/<owner>/<repo>`.
+(`.github/workflows/docker.yml`). The image reference is **always lowercase**
+(Docker requires it); the workflow lowercases the repo, so this project ships
+as `ghcr.io/asamedia/luftbilderzeitstrahl`.
 
 On your own server:
 
 ```bash
-cp .env.example .env          # set IMAGE=ghcr.io/<owner>/<repo>:latest (lowercase)
+cp .env.example .env          # IMAGE already set to the lowercase ghcr path
 docker compose pull
 docker compose up -d
 ```
@@ -41,8 +43,10 @@ App is then on `http://<server>:${HOST_PORT:-3222}` (host port 3222 by
 default — 3000 is assumed taken on the server; the container still listens on
 3000 internally). Put it behind your own reverse proxy / TLS as usual.
 
-- **Build locally instead of pulling:** `docker compose build && docker compose up -d`
-  (the compose file has both `image:` and `build: .`).
+- **Build locally instead of pulling** (from a full repo checkout, *not* in
+  Dockge): `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`.
+  The main compose file is pull-only on purpose so stack managers don't try to
+  build from a source-less folder.
 - **Cache** (processed frames + upstream responses) persists in the named
   volume `lz-cache` mounted at `/data` (`CACHE_DIR=/data`). It's safe to wipe;
   it just rebuilds on demand. First view of a dense aerial year is slow, then

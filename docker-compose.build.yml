@@ -1,0 +1,10 @@
+# Optional override to BUILD the image from a full source checkout instead of
+# pulling it from GHCR. Do NOT use this in Dockge (its stack folder has no
+# source). From a clone of the repo:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml build
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d
+
+services:
+  app:
+    build: .
