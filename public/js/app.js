@@ -5,7 +5,59 @@
 const MIN_ZOOM = 13;
 const PLAY_INTERVAL_MS = 1800;
 
+// Honour the OS-level "reduce motion" preference: the cinematic playback hard-
+// cuts between years instead of cross-fading, and the bigYear pop is dropped
+// (the CSS does the same for the bar/pop animations).
+const REDUCED_MOTION =
+  typeof window.matchMedia === 'function' &&
+  window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// --- shareable permalink ----------------------------------------------------
+// Encodes `#lng,lat,zoom/type/year` so any visible scene can be shared with a
+// single URL. The hash takes precedence over the saved-view localStorage on
+// load; on every meaningful state change it is rewritten via replaceState (no
+// history pollution) and the year is remembered until the year list lands.
+function parseHash() {
+  const h = (location.hash || '').replace(/^#/, '');
+  if (!h) return null;
+  const m = h.match(
+    /^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?),(\d+(?:\.\d+)?)(?:\/(op|lb)(?:\/(\d{4}))?)?$/
+  );
+  if (!m) return null;
+  const lng = +m[1];
+  const lat = +m[2];
+  const z = +m[3];
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || !Number.isFinite(z)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180 || z < 0 || z > 24) return null;
+  return { lat, lng, z, type: m[4] || null, year: m[5] ? +m[5] : null };
+}
+
+let _writeHashTimer = null;
+function writeHash() {
+  clearTimeout(_writeHashTimer);
+  _writeHashTimer = setTimeout(() => {
+    const c = map.getCenter();
+    const z = map.getZoom();
+    const yr = state.years.length ? state.years[state.idx].year : null;
+    const parts = [
+      `${c.lng.toFixed(5)},${c.lat.toFixed(5)},${z}`,
+      state.type,
+    ];
+    if (yr != null) parts.push(yr);
+    const next = '#' + parts.join('/');
+    if (location.hash === next) return;
+    try {
+      history.replaceState(null, '', next);
+    } catch {
+      location.hash = next; // pre-HTML5 browsers / Safari edge cases
+    }
+  }, 120);
+}
+
+const _hash0 = parseHash();
+
 // Restore the last map view from a previous visit; otherwise show Thüringen.
+// A hash permalink, if present, takes precedence over the saved view.
 const VIEW_KEY = 'lzView';
 function savedView() {
   try {
@@ -23,11 +75,15 @@ function savedView() {
   }
   return null;
 }
-const _v0 = savedView();
+const _v0 = _hash0 || savedView();
 const map = L.map('map', { zoomControl: true, minZoom: 7 }).setView(
   _v0 ? [_v0.lat, _v0.lng] : [50.91, 11.03],
   _v0 ? _v0.z : 9
 );
+
+// Year requested via permalink — applied once the year list has loaded for
+// the current viewport (might not exist there → fallback to most-recent).
+let _pendingHashYear = _hash0 ? _hash0.year : null;
 
 map.on('moveend zoomend', () => {
   try {
@@ -39,6 +95,7 @@ map.on('moveend zoomend', () => {
   } catch {
     /* localStorage unavailable */
   }
+  writeHash();
 });
 
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -63,7 +120,7 @@ const imageryLayer = L.layerGroup().addTo(map);
 const outlineLayer = L.layerGroup();
 
 const state = {
-  type: 'op',
+  type: _hash0 && _hash0.type ? _hash0.type : 'op',
   years: [], // [{ year, count }]
   features: [],
   idx: 0,
@@ -229,11 +286,22 @@ async function refreshYears() {
     return;
   }
 
-  // Keep the user on the same year across pans when still available,
-  // otherwise jump to the most recent year here.
-  const keep = state.years.findIndex((y) => y.year === prevYear);
-  state.idx = keep >= 0 ? keep : state.years.length - 1;
+  // Priority order for which year to land on:
+  //   1. a `…/year` from a permalink, if that year exists in the new bbox
+  //   2. the year the user was already on (across pans)
+  //   3. the most recent year available here
+  let targetIdx = -1;
+  if (_pendingHashYear != null) {
+    targetIdx = state.years.findIndex((y) => y.year === _pendingHashYear);
+    _pendingHashYear = null; // one-shot — don't fight later user actions
+  }
+  if (targetIdx < 0) {
+    const keep = state.years.findIndex((y) => y.year === prevYear);
+    targetIdx = keep >= 0 ? keep : state.years.length - 1;
+  }
+  state.idx = targetIdx;
   updateLabel();
+  writeHash();
   loadTiles();
 }
 
@@ -530,6 +598,7 @@ function setIdx(i) {
   if (state.playing) stopPlayback(false); // manual step cancels the render
   state.idx = Math.max(0, Math.min(state.years.length - 1, i));
   updateLabel();
+  writeHash();
   loadTiles();
 }
 
@@ -626,6 +695,7 @@ function setBigYear(y) {
   const e = el('bigYear');
   e.textContent = y;
   e.classList.remove('hidden', 'anim');
+  if (REDUCED_MOTION) return; // no pop for users who opted out of motion
   void e.offsetWidth; // restart the pop animation
   e.classList.add('anim');
 }
@@ -692,26 +762,33 @@ async function startPlayback() {
     // cross-dissolve. Raw Luftbilder do NOT register (tilt/relief differ per
     // epoch); cross-dissolving them looks like a broken morph, so instead fade
     // the old year out THROUGH the dark background, then the new year in — the
-    // two misaligned years are never on screen together.
+    // two misaligned years are never on screen together. Users who asked for
+    // reduced motion get a plain hard cut (no fade at all).
     const lbSeq = type === 'lb';
-    await tween(PLAY_FADE_MS, (k) => {
-      let pa;
-      let na;
-      if (lbSeq) {
-        pa = Math.max(0, 1 - 2 * k);
-        na = Math.max(0, 2 * k - 1);
-      } else {
-        pa = 1 - k;
-        na = k;
-      }
-      if (prev) setGroupOpacity(prev, pa * state.opacity);
-      setGroupOpacity(built.group, na * state.opacity);
-    });
+    if (REDUCED_MOTION) {
+      if (prev) setGroupOpacity(prev, 0);
+      setGroupOpacity(built.group, state.opacity);
+    } else {
+      await tween(PLAY_FADE_MS, (k) => {
+        let pa;
+        let na;
+        if (lbSeq) {
+          pa = Math.max(0, 1 - 2 * k);
+          na = Math.max(0, 2 * k - 1);
+        } else {
+          pa = 1 - k;
+          na = k;
+        }
+        if (prev) setGroupOpacity(prev, pa * state.opacity);
+        setGroupOpacity(built.group, na * state.opacity);
+      });
+    }
     dropGroup(prev);
     prev = built.group;
 
     state.idx = idx;
     updateLabel();
+    writeHash();
 
     const nextIdx = idx + 1 > state.years.length - 1 ? 0 : idx + 1;
     preload = { idx: nextIdx, promise: buildAt(nextIdx) };
@@ -1171,6 +1248,7 @@ el('productToggle').addEventListener('click', (ev) => {
     .querySelectorAll('#productToggle button')
     .forEach((b) => b.classList.toggle('active', b === btn));
   syncCoverUI();
+  writeHash();
   refreshYears();
 });
 
@@ -1362,5 +1440,55 @@ map.on('moveend zoomend', scheduleRefresh);
 // already-loaded features until the debounced reload catches up).
 map.on('moveend', updateSpotlight);
 
+// --- keyboard shortcuts ----------------------------------------------------
+// ← / → step through years, space toggles the cinematic playback, +/− zoom.
+// Capture phase so we beat Leaflet's own arrow-key panning (which would
+// otherwise also fire when the map container has focus). Search field, About
+// modal, and modifier-key combos are passed through untouched.
+document.addEventListener(
+  'keydown',
+  (ev) => {
+    const t = ev.target;
+    if (
+      t &&
+      (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)
+    ) {
+      return;
+    }
+    if (!aboutOverlay.classList.contains('hidden')) return;
+    if (ev.ctrlKey || ev.altKey || ev.metaKey) return;
+
+    if (ev.key === 'ArrowLeft') {
+      if (!state.years.length) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      setIdx(state.idx - 1);
+    } else if (ev.key === 'ArrowRight') {
+      if (!state.years.length) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      setIdx(state.idx + 1);
+    } else if (ev.key === ' ' || ev.code === 'Space') {
+      if (!state.years.length) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      togglePlay();
+    } else if (ev.key === '+' || ev.key === '=') {
+      ev.preventDefault();
+      ev.stopPropagation();
+      map.zoomIn();
+    } else if (ev.key === '-' || ev.key === '_') {
+      ev.preventDefault();
+      ev.stopPropagation();
+      map.zoomOut();
+    }
+  },
+  true
+);
+
+// Reflect any product type that came from the URL hash before the first load.
+document
+  .querySelectorAll('#productToggle button')
+  .forEach((b) => b.classList.toggle('active', b.dataset.type === state.type));
 syncCoverUI();
 refreshYears();

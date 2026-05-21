@@ -716,3 +716,22 @@ body {
   color: var(--muted);
   font-size: 13px;
 }
+
+/* Respect the user's OS-level "reduce motion" preference: skip every
+   non-essential animation so the page doesn't induce motion sickness. The
+   cinematic playback uses a JS guard for the same reason. */
+@media (prefers-reduced-motion: reduce) {
+  #bigYear.anim {
+    animation: none;
+  }
+  #progress.indeterminate #progressBar {
+    animation: none;
+    width: 0;
+  }
+  #progressBar {
+    transition: none;
+  }
+  #aboutCard .about-links a {
+    transition: none;
+  }
+}
